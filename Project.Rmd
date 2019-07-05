@@ -1,0 +1,278 @@
+---
+  title: "Final Project"
+output: html_document
+---
+  ---
+  title: "Final Project"
+output: html_document
+---
+```{r}
+library(forecast)
+library(zoo)
+library(xts)
+library(urca)
+library(ggplot2)
+library(rugarch)
+library(plyr)
+
+#IEO is an oil exploitation ETF, frequently trading
+IEO<-read.csv("IEO.csv")
+#Make IEO time series
+IEO.ts <- xts(IEO$Adj.Close, as.Date(IEO$Date))
+plot(IEO.ts)
+#create return and variance
+ret<-diff(log(IEO.ts))
+plot(ret^2)
+#examine pacf of IEO time series, significant correlation with one lag. 
+#Highly likely to be random walk and need further test for unit root.
+Pacf(IEO.ts)
+#examine volatility of return, which is persistent and gradually decay
+vol<-sqrt(ret^2)
+Pacf(vol)
+#create training and validation set
+train.ts <- window(IEO.ts, end = "2015-12-31")
+valid.ts <- window(IEO.ts, start = "2016-01-01")
+ntrain <- length(train.ts)
+nvalid <- length(valid.ts)
+
+#DF Test on Whole Data Set, Fail to reject null hypothesis → unit root 
+df.test <- ur.df(IEO.ts,type="trend",selectlags="BIC")
+print(summary(df.test))
+sum <- summary(df.test)
+teststat <- sum@teststat[3]
+# critical value at 5 percent
+critical <- sum@cval[3,2]
+abs(critical)<abs(teststat) #Not reject null, series has unit root
+
+# Build Arima Model based on "bic" using training data set
+ArimaMod <- auto.arima(train.ts, d=1, ic="bic", seasonal = FALSE)
+summary(ArimaMod) #give us (0,1,0), that is a random walk
+fcast_Arima<- Arima(valid.ts, model = ArimaMod) #one step ahead forecasting
+#make fitted value both in training and validation time series data;preparing for ploting
+fcast_fitted_Arima.ts <- xts(fcast_Arima$fitted, as.Date(IEO$Date[(ntrain+1):(ntrain+nvalid)]))
+mod_fitted_Arima.ts <- xts(ArimaMod$fitted, as.Date(IEO$Date[1:ntrain]))
+#examine model's accuracy
+print(accuracy(fcast_Arima$fitted, valid.ts))
+
+#Plot, the fitted values highly coincide with actual value due to one step ahead process
+plot(IEO.ts, ylab="Price",xlab="Time",bty="l",main="Forecast of IEO Price(Arima(0,1,0))", flty=2)
+lines(mod_fitted_Arima.ts, lwd=0.5,col="aquamarine3")
+lines(fcast_fitted_Arima.ts, lwd=0.5,col="azure3")
+
+```
+```{r}
+# Exponential Filter Forecast
+# First, estimate addiive trend filter
+filter.mod <- ets(train.ts, model = "AAN")
+# Now, build forecasts for validation periods (uses no data there)
+filter.pred <- forecast(filter.mod, h = nvalid)
+plot(filter.pred)
+# Now, build one step ahead forecasts for validation data, using estimated model
+filter.onestep <- ets(valid.ts, model = filter.mod)
+#make it time series through xts
+filter.onestep.fitted.ts <- xts(filter.onestep$fitted, as.Date(IEO$Date[(ntrain + 1):(ntrain + nvalid)]))
+plot(IEO.ts, main = "Filter Forecast (with trend)")
+lines(filter.onestep.fitted.ts,lwd = 1, col="azure3", lty = 2)
+# check accuracy
+print(accuracy(filter.onestep$fitted, valid.ts))
+```
+
+```{r}
+# Use Mean of full data set as Naive Forecast
+nALL <- length(IEO.ts)
+naive.valid <- rep(mean(IEO.ts),nvalid)
+naive.ts<-xts(naive.valid, as.Date(IEO$Date[(ntrain + 1):(ntrain + nvalid)]))
+#Plot
+plot(IEO.ts)
+lines(naive.ts,col="blue") 
+
+# RMSE of Naive, Arima and Filter
+naive.valid.res <- valid.ts-naive.valid
+arima.valid.res<-residuals(fcast_Arima)
+filter.valid.res<-residuals(filter.onestep)
+V.rmse <- rep(NA,3)
+V.mae<-rep(NA,3)
+V.rmse[1] <- sqrt(mean((naive.valid.res)^2, na.rm =TRUE))
+V.rmse[2] <- sqrt(mean((arima.valid.res)^2, na.rm =TRUE))
+V.rmse[3]  <- sqrt(mean((filter.valid.res)^2, na.rm =TRUE))
+V.mae[1]<-mean(abs(naive.valid.res))
+V.mae[2]<-mean(abs(arima.valid.res))
+V.mae[3]<-mean(abs(filter.valid.res))
+# Compare RMSE for three models 
+a<-data.frame(V.rmse=V.rmse,
+              Vmae=V.mae,
+           row.names = c("Naive", "Arima","Filter"))
+print(a)
+
+```
+
+```{r}
+# perform some Diebold/Mariano tests
+print("Diebold/Mariano ARIMA versus Naive")
+print(dm.test(residuals(fcast_Arima),naive.valid.res))
+
+print("Diebold/Mariano Exponential Filter versus Naive")
+print(dm.test(residuals(filter.onestep),naive.valid.res))
+
+print("Diebold/Mariano ARIMA versus Exponential Filter")
+print(dm.test(residuals(fcast_Arima),residuals(filter.onestep)))
+```
+
+
+```{r}
+#AGG ETF
+AGG<-read.csv("AGG.csv")
+Return<-diff(log(AGG$Adj.Close))
+Date<-AGG[-1,1]
+bond_return.ts <- zoo(Return,as.Date(Date))
+bond_return.valid <- window(bond_return.ts,start=as.Date("2016-01-01"),end = as.Date("2018-12-04"))
+tail(bond_return.valid)
+#compare variance of IEO and bond
+IEO_var<-window(ret^2,start=as.Date("2016-01-01"),end = as.Date("2018-12-04"))
+bond_var<-bond_return.valid^2
+plot(bond_var)
+#Plot both varainces
+ggplot() + 
+  geom_line(aes(y = IEO_var, x = time(IEO_var), col = "IEO's variance"))+
+  geom_line(aes(y = bond_var, x = time(bond_var), col = "Bond's variance")) +
+  labs(title ="Bond's varaince vs IEO's varaince", x = "Time", y = "Daily Variance")+
+  theme(legend.position = "bottom")
+# The volatility of bond respecting to IEO is very small
+
+```
+
+```{r}
+#Aggregation Function
+monagg <- function(data)
+{
+  temp <- tail(data,n=1)
+  m <- nrow(data)
+  # these are the three lines to really pay attention to
+  temp$ret <- prod(1+data$V1)-1
+  temp$m <- m # number of days
+  temp$sd<-sd(data$V1)
+  # return monthly record
+  temp
+}
+#Generate IEO's Returns
+IEO<-read.csv("IEO.csv")
+IEO.ts <- xts(IEO$Adj.Close, as.Date(IEO$Date))
+rsp <- diff(log(IEO.ts))
+rsp<-rsp[-1,]
+head(rsp)
+train.ts <- window(rsp, end = "2015-12-31")
+valid.ts <- window(rsp, start = "2016-01-01")
+ntrain <- length(train.ts)
+nvalid <- length(valid.ts)
+
+#GARCH Model in Training set
+spec <- ugarchspec(variance.model=list(model="sGARCH",garchOrder=c(1,1)),
+                   mean.model=list(include.mean=T,armaOrder=c(0,0)))
+fittrain <- ugarchfit(spec = spec, data=train.ts)
+
+#Forecasting Volatility in Validation set
+setfixed(spec) <- as.list(coef(fittrain))
+ugarchfilter <- ugarchfilter(spec=spec,data=valid.ts)
+# fitted volatility
+garchVolvalid.ts <- zoo(sigma(ugarchfilter))
+#check mean of fitted volatility
+mean(garchVolvalid.ts)
+#plot fitted volatility
+ggplot() + 
+  geom_line(aes(y = sqrt(IEO_var), x = time(IEO_var), col = "IEO's volatility"))+
+  geom_line(aes(y = garchVolvalid.ts, x = time(garchVolvalid.ts), col = "fitted volatility")) +
+  labs(title ="Garch fitted volatility vs actual volatility", x = "Time", y = "Daily Volatility")+
+  theme(legend.position = "bottom")
+
+
+#Build Strategy:
+#set for 1 percent daily volatility target
+#use GARCH fitted volatility as estimate of next day's volatility to adjust daily weight
+#use Arima fitted return as estimate of next day's return
+#compare dynamic strategy to constant strategy and whole equity strategy through monthly aggregation 
+target<-0.01
+weight <- target/garchVolvalid.ts
+#The maximum weight is 1
+weight[weight$x>1]=1
+length(weight)
+# constant portfolio benchmark
+mweight <- mean(weight)
+
+# dynamic daily portfolio 
+#one step ahead fitted return
+IEO_fitted.return<-diff(log(fcast_Arima$fitted))
+head(IEO_fitted.return)
+length(IEO_fitted.return)
+#Adjust length the same as fitted return
+weight<-weight[-1]
+length(weight)
+bond_return.valid<-bond_return.valid[-1]
+length(bond_return.valid)
+
+#Return for dynamic portfolio
+pret  <-  as.vector(IEO_fitted.return*weight)  + as.vector(bond_return.valid*(1-weight))
+#Return for constant weight portfolio
+pretConstant <-  as.vector(IEO_fitted.return)*mweight  + as.vector(bond_return.valid)*(1-mweight)
+#Return for Whole IEO ETF
+pretEquity   <- as.vector(IEO_fitted.return)
+
+# Monthly Aggregate Return for Dynamic Strategy
+pret.ts <- xts(pret, as.Date(IEO$Date[(ntrain+2):(ntrain+nvalid)]))
+pret.month <- as.data.frame(pret.ts)
+pret.month$date <- rownames(pret.month)
+pret.month$key <-as.numeric(format(as.Date(pret.month$date),"%Y"))*100+as.numeric(format(as.Date(pret.month$date),"%m"))
+pret.month<-pret.month[-1,]
+
+pret.month <- ddply(pret.month,.variables = "key",.fun = monagg)
+#mean annualized return
+mean(pret.month$ret)*12
+#mean annualized standard deviation
+mean(pret.month$sd,na.rm = TRUE)*sqrt(12)
+
+
+# Monthly Aggregate Return for Constant Strategy
+pretConstant.ts <- xts(pretConstant, as.Date(IEO$Date[(ntrain+2):(ntrain+nvalid)]))
+pretConstant.month <- as.data.frame(pretConstant.ts)
+pretConstant.month$date <- rownames(pretConstant.month)
+pretConstant.month$key <-as.numeric(format(as.Date(pretConstant.month$date),"%Y"))*100+as.numeric(format(as.Date(pretConstant.month$date),"%m"))
+pretConstant.month<-pretConstant.month[-1,]
+pretConstant.month <- ddply(pretConstant.month,.variables = "key",.fun = monagg)
+#mean annualized return
+mean(pretConstant.month$ret)*12
+#mean annualized standard deviation
+mean(pretConstant.month$sd,na.rm = TRUE)*sqrt(12)
+
+# Monthly Aggregate Return for Whole ETF
+pretEquity.ts <- xts(pretEquity, as.Date(IEO$Date[(ntrain+2):(ntrain+nvalid)]))
+pretEquity.month <- as.data.frame(pretEquity.ts)
+pretEquity.month$date <- rownames(pretEquity.month)
+pretEquity.month$key <-as.numeric(format(as.Date(pretEquity.month$date),"%Y"))*100+as.numeric(format(as.Date(pretEquity.month$date),"%m"))
+pretEquity.month<-pretEquity.month[-1,]
+pretEquity.month <- ddply(pretEquity.month,.variables = "key",.fun = monagg)
+#mean annualized return
+mean(pretEquity.month$ret)*12
+#mean annualized standard deviation
+mean(pretEquity.month$sd,na.rm = TRUE)*sqrt(12)
+
+# Compare annualized mean, standard deviation and sharp ratio for three strategies 
+A.return <- rep(NA,3)
+A.volatility<-rep(NA,3)
+A.sharp_ratio<-rep(NA,3)
+A.return[1] <- mean(pret.month$ret)*12
+A.return[2] <- mean(pretConstant.month$ret)*12
+A.return[3]  <- mean(pretEquity.month$ret)*12
+A.volatility[1]<-mean(pret.month$sd,na.rm = TRUE)*sqrt(12)
+A.volatility[2]<-mean(pretConstant.month$sd,na.rm = TRUE)*sqrt(12)
+A.volatility[3]<-mean(pretEquity.month$sd,na.rm = TRUE)*sqrt(12)
+A.sharp_ratio[1]<-(mean(pret.month$ret)*12-0.03)/(mean(pret.month$sd,na.rm = TRUE)*sqrt(12))
+A.sharp_ratio[2]<-(mean(pretConstant.month$ret)*12-0.03)/(mean(pretConstant.month$sd,na.rm = TRUE)*sqrt(12))
+A.sharp_ratio[3]<-(mean(pretEquity.month$ret)*12-0.03)/(mean(pretEquity.month$sd,na.rm = TRUE)*sqrt(12))
+
+
+a<-data.frame(A.return=A.return,
+              A.volatility=A.volatility,
+              A.sharp_ratio=A.sharp_ratio,
+           row.names = c("Dynamic Strategy", "Constant Strategy","Whole Equity Strategy"))
+print(a)
+
+```
